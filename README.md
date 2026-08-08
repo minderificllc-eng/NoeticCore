@@ -84,6 +84,44 @@ Run the unit tests with:
 python -m pytest tests/
 ```
 
+## Communication Front-Ends
+
+The `comm/` directory holds starter bots for chat platforms. Each one replies
+to a start command, echoes plain text, and reads its token from the
+environment — no credential ever lives in source control.
+
+### Telegram
+
+1. Create a bot with [BotFather](https://t.me/BotFather) and copy its token.
+2. Run:
+
+```bash
+pip install -r requirements.txt
+export TELEGRAM_BOT_TOKEN=your-bot-token
+python comm/telegram_bot.py
+```
+
+Send `/start` to the bot for a greeting; any other text is echoed back.
+
+### Discord
+
+1. Create an application and bot in the
+   [Discord Developer Portal](https://discord.com/developers/applications),
+   copy the bot token, and enable **Message Content Intent** under Bot
+   settings.
+2. Invite the bot to your server (OAuth2 URL with the `bot` scope and the
+   Send Messages permission).
+3. Run:
+
+```bash
+pip install -r requirements.txt
+export DISCORD_BOT_TOKEN=your-bot-token
+python comm/discord_bot.py
+```
+
+Send `!start` in a channel the bot can read for a greeting; any other text is
+echoed back.
+
 ## Design Philosophy
 
 NoeticCore treats the file system as both memory and workspace. By constraining the agent to load / read / update / save operations, the system remains transparent, auditable, and easy to interrupt or resume. All progress is visible as ordinary files on disk.
