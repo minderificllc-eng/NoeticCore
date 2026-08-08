@@ -49,6 +49,13 @@ python noetic_core.py
 
 Ensure `SOUL.md`, `AGENT.md`, and `SEED.md` are present in the working directory before starting. Edit `SEED.md` to describe the application you want built; the included seed is a small runnable demo.
 
+### Supervised shell execution
+
+By default the agent runs shell commands autonomously. Set
+`NOETIC_SHELL_APPROVAL=ask` to review each proposed command and approve or
+decline it interactively; a declined command is reported back to the agent so
+it can adjust its approach.
+
 ### Using a local model via Ollama
 
 NoeticCore can target any Anthropic-compatible endpoint. Ollama 0.14.0 and

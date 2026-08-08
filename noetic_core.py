@@ -22,6 +22,11 @@ DEFAULT_MODEL_ID = "claude-opus-5"
 API_KEY_ENVIRONMENT_VARIABLE_NAME = "ANTHROPIC_API_KEY"
 MODEL_ID_ENVIRONMENT_VARIABLE_NAME = "NOETIC_MODEL_ID"
 BASE_URL_ENVIRONMENT_VARIABLE_NAME = "ANTHROPIC_BASE_URL"
+SHELL_APPROVAL_ENVIRONMENT_VARIABLE_NAME = "NOETIC_SHELL_APPROVAL"
+
+SHELL_APPROVAL_ALLOW = "allow"
+SHELL_APPROVAL_ASK = "ask"
+VALID_SHELL_APPROVAL_POLICIES = (SHELL_APPROVAL_ALLOW, SHELL_APPROVAL_ASK)
 
 SOUL_FILE_NAME = "SOUL.md"
 AGENT_FILE_NAME = "AGENT.md"
@@ -100,6 +105,37 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 },
             },
             "required": ["relative_path", "content"],
+        },
+    },
+    {
+        "name": "file_edit",
+        "description": (
+            "Replace one exact text occurrence in an existing file. Call this"
+            " for targeted changes instead of rewriting the whole file."
+            " file_read the file first; old_text must match its content"
+            " exactly once, so include enough surrounding lines to be unique."
+            " Use file_write for new files or full rewrites."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "relative_path": {
+                    "type": "string",
+                    "description": "File path relative to the workspace root.",
+                },
+                "old_text": {
+                    "type": "string",
+                    "description": (
+                        "The exact existing text to replace; must appear"
+                        " exactly once in the file."
+                    ),
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": "The replacement text.",
+                },
+            },
+            "required": ["relative_path", "old_text", "new_text"],
         },
     },
     {
@@ -185,6 +221,29 @@ class FileWriteError(NoeticCoreError):
         self.relative_path = relative_path
 
 
+class FileEditTargetError(NoeticCoreError):
+    """An edit's target text did not match exactly once in the file."""
+
+    def __init__(self, relative_path: str, occurrence_count: int) -> None:
+        super().__init__(
+            f"Edit target matched {occurrence_count} times in {relative_path};"
+            " it must match exactly once. Provide a longer, unique old_text."
+        )
+        self.relative_path = relative_path
+        self.occurrence_count = occurrence_count
+
+
+class OperatorDeclinedError(NoeticCoreError):
+    """The human operator declined a proposed shell command."""
+
+    def __init__(self, command: str) -> None:
+        super().__init__(
+            f"Operator declined this command: {command}."
+            " Explain your intent or try a different approach."
+        )
+        self.command = command
+
+
 class PathOutsideWorkspaceError(NoeticCoreError):
     """A path resolves to a location outside the workspace directory."""
 
@@ -228,11 +287,29 @@ class ModelConfiguration:
     base_url is None for the Anthropic cloud API; any other value is an
     Anthropic-compatible endpoint (for example an Ollama server on the LAN).
     Prompt caching is an Anthropic-cloud feature, so it is enabled only there.
+    shell_approval_policy is one of VALID_SHELL_APPROVAL_POLICIES and controls
+    whether each shell command needs operator approval before it runs.
     """
 
     model_id: str
     base_url: str | None
     prompt_caching_is_enabled: bool
+    shell_approval_policy: str
+
+
+def shell_approval_policy_load() -> str:
+    """Return the validated shell approval policy from the environment.
+    Raises ConfigurationError for an unrecognized value."""
+    shell_approval_policy = os.environ.get(
+        SHELL_APPROVAL_ENVIRONMENT_VARIABLE_NAME, SHELL_APPROVAL_ALLOW
+    )
+    if shell_approval_policy in VALID_SHELL_APPROVAL_POLICIES:
+        return shell_approval_policy
+    raise ConfigurationError(
+        f"{SHELL_APPROVAL_ENVIRONMENT_VARIABLE_NAME} is set to"
+        f" '{shell_approval_policy}'; valid values are"
+        f" {', '.join(VALID_SHELL_APPROVAL_POLICIES)}."
+    )
 
 
 def model_configuration_load() -> ModelConfiguration:
@@ -243,17 +320,30 @@ def model_configuration_load() -> ModelConfiguration:
         model_id=model_id,
         base_url=base_url,
         prompt_caching_is_enabled=base_url is None,
+        shell_approval_policy=shell_approval_policy_load(),
     )
+
+
+def shell_command_approve(command: str) -> bool:
+    """Show the proposed command to the operator and return their decision."""
+    print(f"\nProposed shell command:\n  {command}")
+    operator_answer = input("Run this command? [y/N] ")
+    return operator_answer.strip().lower() == "y"
 
 
 def model_target_describe(model_configuration: ModelConfiguration) -> str:
     """Return a one-line description of where requests will be sent."""
-    if model_configuration.base_url is None:
-        return f"model {model_configuration.model_id} via the Anthropic API"
-    return (
-        f"model {model_configuration.model_id}"
-        f" via {model_configuration.base_url}"
+    endpoint_description = (
+        "the Anthropic API"
+        if model_configuration.base_url is None
+        else model_configuration.base_url
     )
+    target_description = (
+        f"model {model_configuration.model_id} via {endpoint_description}"
+    )
+    if model_configuration.shell_approval_policy == SHELL_APPROVAL_ASK:
+        return f"{target_description} (shell commands require approval)"
+    return target_description
 
 
 def system_prompt_block_build(
@@ -326,6 +416,19 @@ class FileStore:
             file_path.write_text(content, encoding="utf-8")
         except OSError as write_error:
             raise FileWriteError(relative_path) from write_error
+
+    def file_edit(
+        self, relative_path: str, old_text: str, new_text: str
+    ) -> None:
+        """Replace old_text with new_text in the file. Raises
+        FileEditTargetError unless old_text matches exactly once, plus the
+        file_read and file_write errors."""
+        current_content = self.file_read(relative_path)
+        occurrence_count = current_content.count(old_text)
+        if occurrence_count != 1:
+            raise FileEditTargetError(relative_path, occurrence_count)
+        updated_content = current_content.replace(old_text, new_text)
+        self.file_write(relative_path, updated_content)
 
     def file_list(self) -> list[str]:
         """Return every visible file as a sorted workspace-relative path."""
@@ -436,6 +539,7 @@ class AgentLoop:
         self.tool_handlers: dict[str, Callable[[dict[str, Any]], str]] = {
             "file_read": self.tool_file_read,
             "file_write": self.tool_file_write,
+            "file_edit": self.tool_file_edit,
             "file_list": self.tool_file_list,
             "shell_command_run": self.tool_shell_command_run,
             "task_complete": self.tool_task_complete,
@@ -568,6 +672,13 @@ class AgentLoop:
         self.file_store.file_write(relative_path, content)
         return f"Wrote {len(content)} characters to {relative_path}."
 
+    def tool_file_edit(self, tool_input: dict[str, Any]) -> str:
+        relative_path = tool_input["relative_path"]
+        self.file_store.file_edit(
+            relative_path, tool_input["old_text"], tool_input["new_text"]
+        )
+        return f"Applied the edit to {relative_path}."
+
     def tool_file_list(self, tool_input: dict[str, Any]) -> str:
         file_paths = self.file_store.file_list()
         if not file_paths:
@@ -575,9 +686,13 @@ class AgentLoop:
         return "\n".join(file_paths)
 
     def tool_shell_command_run(self, tool_input: dict[str, Any]) -> str:
-        command_result = self.shell_executor.shell_command_run(
-            tool_input["command"]
+        command = tool_input["command"]
+        approval_is_required = (
+            self.model_configuration.shell_approval_policy == SHELL_APPROVAL_ASK
         )
+        if approval_is_required and not shell_command_approve(command):
+            raise OperatorDeclinedError(command)
+        command_result = self.shell_executor.shell_command_run(command)
         return command_result.report_format()
 
     def tool_task_complete(self, tool_input: dict[str, Any]) -> str:

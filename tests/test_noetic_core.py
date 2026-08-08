@@ -15,8 +15,11 @@ from noetic_core import (
     DEFAULT_MODEL_ID,
     FOUNDATION_DOCUMENT_FILE_NAMES,
     MAXIMUM_TOOL_RESULT_CHARACTERS,
+    SHELL_APPROVAL_ALLOW,
+    SHELL_APPROVAL_ASK,
     AgentLoop,
     ConfigurationError,
+    FileEditTargetError,
     FileMissingError,
     FileStore,
     ModelConfiguration,
@@ -41,13 +44,17 @@ def file_store(workspace: Path) -> FileStore:
     return FileStore(workspace)
 
 
-@pytest.fixture
-def agent_loop(workspace: Path, file_store: FileStore) -> AgentLoop:
+def agent_loop_build(
+    workspace: Path, file_store: FileStore, shell_approval_policy: str
+) -> AgentLoop:
     for file_name in FOUNDATION_DOCUMENT_FILE_NAMES:
         (workspace / file_name).write_text(f"# {file_name}\n", encoding="utf-8")
     placeholder_client = object()
     model_configuration = ModelConfiguration(
-        model_id=DEFAULT_MODEL_ID, base_url=None, prompt_caching_is_enabled=True
+        model_id=DEFAULT_MODEL_ID,
+        base_url=None,
+        prompt_caching_is_enabled=True,
+        shell_approval_policy=shell_approval_policy,
     )
     return AgentLoop(
         placeholder_client,
@@ -55,6 +62,16 @@ def agent_loop(workspace: Path, file_store: FileStore) -> AgentLoop:
         file_store,
         ShellExecutor(workspace),
     )
+
+
+@pytest.fixture
+def agent_loop(workspace: Path, file_store: FileStore) -> AgentLoop:
+    return agent_loop_build(workspace, file_store, SHELL_APPROVAL_ALLOW)
+
+
+@pytest.fixture
+def supervised_agent_loop(workspace: Path, file_store: FileStore) -> AgentLoop:
+    return agent_loop_build(workspace, file_store, SHELL_APPROVAL_ASK)
 
 
 class TestFileStore:
@@ -75,6 +92,31 @@ class TestFileStore:
     ) -> None:
         with pytest.raises(PathOutsideWorkspaceError):
             file_store.path_resolve("/etc/passwd")
+
+    def test_file_edit_replaces_unique_occurrence(
+        self, file_store: FileStore
+    ) -> None:
+        file_store.file_write("code.py", "value = 1\nother = 2\n")
+        file_store.file_edit("code.py", "value = 1", "value = 10")
+        assert file_store.file_read("code.py") == "value = 10\nother = 2\n"
+
+    def test_file_edit_zero_matches_raises(self, file_store: FileStore) -> None:
+        file_store.file_write("code.py", "value = 1\n")
+        with pytest.raises(FileEditTargetError) as error_info:
+            file_store.file_edit("code.py", "absent text", "replacement")
+        assert error_info.value.occurrence_count == 0
+
+    def test_file_edit_multiple_matches_raises(
+        self, file_store: FileStore
+    ) -> None:
+        file_store.file_write("code.py", "x = 1\nx = 1\n")
+        with pytest.raises(FileEditTargetError) as error_info:
+            file_store.file_edit("code.py", "x = 1", "x = 2")
+        assert error_info.value.occurrence_count == 2
+
+    def test_file_edit_missing_file_raises(self, file_store: FileStore) -> None:
+        with pytest.raises(FileMissingError):
+            file_store.file_edit("absent.py", "old", "new")
 
     def test_file_list_excludes_hidden_paths(
         self, workspace: Path, file_store: FileStore
@@ -153,6 +195,37 @@ class TestAgentLoopDispatch:
         )
         assert read_result.content == "data"
 
+    def test_file_edit_through_dispatch(self, agent_loop: AgentLoop) -> None:
+        agent_loop.tool_call_dispatch(
+            "file_write", {"relative_path": "app.py", "content": "count = 1\n"}
+        )
+        edit_result = agent_loop.tool_call_dispatch(
+            "file_edit",
+            {
+                "relative_path": "app.py",
+                "old_text": "count = 1",
+                "new_text": "count = 2",
+            },
+        )
+        assert not edit_result.is_error
+        read_result = agent_loop.tool_call_dispatch(
+            "file_read", {"relative_path": "app.py"}
+        )
+        assert read_result.content == "count = 2\n"
+
+    def test_file_edit_failure_returns_error_result(
+        self, agent_loop: AgentLoop
+    ) -> None:
+        agent_loop.tool_call_dispatch(
+            "file_write", {"relative_path": "app.py", "content": "x = 1\nx = 1\n"}
+        )
+        edit_result = agent_loop.tool_call_dispatch(
+            "file_edit",
+            {"relative_path": "app.py", "old_text": "x = 1", "new_text": "x = 2"},
+        )
+        assert edit_result.is_error
+        assert "exactly once" in edit_result.content
+
     def test_task_complete_records_summary(self, agent_loop: AgentLoop) -> None:
         tool_call_result = agent_loop.tool_call_dispatch(
             "task_complete", {"summary": "All goals met."}
@@ -200,6 +273,64 @@ class TestModelConfiguration:
     def test_system_prompt_block_omits_cache_control_when_disabled(self) -> None:
         system_prompt_block = system_prompt_block_build("prompt", False)
         assert "cache_control" not in system_prompt_block
+
+
+class TestShellApproval:
+    def test_default_policy_is_allow(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("NOETIC_SHELL_APPROVAL", raising=False)
+        model_configuration = model_configuration_load()
+        assert model_configuration.shell_approval_policy == SHELL_APPROVAL_ALLOW
+
+    def test_ask_policy_is_accepted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NOETIC_SHELL_APPROVAL", SHELL_APPROVAL_ASK)
+        model_configuration = model_configuration_load()
+        assert model_configuration.shell_approval_policy == SHELL_APPROVAL_ASK
+
+    def test_invalid_policy_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NOETIC_SHELL_APPROVAL", "sometimes")
+        with pytest.raises(ConfigurationError) as error_info:
+            model_configuration_load()
+        assert "sometimes" in str(error_info.value)
+
+    def test_declined_command_returns_error_result(
+        self,
+        supervised_agent_loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr("builtins.input", lambda prompt: "n")
+        tool_call_result = supervised_agent_loop.tool_call_dispatch(
+            "shell_command_run", {"command": "echo hello"}
+        )
+        assert tool_call_result.is_error
+        assert "declined" in tool_call_result.content
+
+    def test_approved_command_runs(
+        self,
+        supervised_agent_loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr("builtins.input", lambda prompt: "y")
+        tool_call_result = supervised_agent_loop.tool_call_dispatch(
+            "shell_command_run", {"command": "echo hello"}
+        )
+        assert not tool_call_result.is_error
+        assert "hello" in tool_call_result.content
+
+    def test_allow_policy_never_prompts(
+        self, agent_loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def input_forbidden(prompt: str) -> str:
+            raise AssertionError("input() must not be called under allow policy")
+
+        monkeypatch.setattr("builtins.input", input_forbidden)
+        tool_call_result = agent_loop.tool_call_dispatch(
+            "shell_command_run", {"command": "echo hello"}
+        )
+        assert not tool_call_result.is_error
 
 
 class TestEnvironmentValidation:
