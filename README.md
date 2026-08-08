@@ -49,6 +49,28 @@ python noetic_core.py
 
 Ensure `SOUL.md`, `AGENT.md`, and `SEED.md` are present in the working directory before starting. Edit `SEED.md` to describe the application you want built; the included seed is a small runnable demo.
 
+### Using a local model via Ollama
+
+NoeticCore can target any Anthropic-compatible endpoint. Ollama 0.14.0 and
+later implements the Anthropic Messages API, so a model served on your LAN
+works with three environment variables:
+
+```bash
+export ANTHROPIC_BASE_URL=http://<lan-host>:11434
+export ANTHROPIC_API_KEY=ollama        # required by the SDK, ignored by Ollama
+export NOETIC_MODEL_ID=qwen3-coder     # any tool-capable model you have pulled
+python noetic_core.py
+```
+
+Notes:
+
+- The model must support tool calling (for example `qwen3-coder` or
+  `llama3.1`); models without tool support cannot drive the loop.
+- Prompt caching is an Anthropic-cloud feature and is disabled automatically
+  whenever `ANTHROPIC_BASE_URL` is set.
+- `NOETIC_MODEL_ID` also works against the Anthropic API to select a different
+  Claude model; it defaults to `claude-opus-5`.
+
 Run the unit tests with:
 
 ```bash

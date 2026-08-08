@@ -12,17 +12,21 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from noetic_core import (
+    DEFAULT_MODEL_ID,
     FOUNDATION_DOCUMENT_FILE_NAMES,
     MAXIMUM_TOOL_RESULT_CHARACTERS,
     AgentLoop,
     ConfigurationError,
     FileMissingError,
     FileStore,
+    ModelConfiguration,
     PathOutsideWorkspaceError,
     ShellCommandResult,
     ShellExecutor,
     api_key_verify,
     foundation_documents_verify,
+    model_configuration_load,
+    system_prompt_block_build,
     tool_result_content_truncate,
 )
 
@@ -42,7 +46,15 @@ def agent_loop(workspace: Path, file_store: FileStore) -> AgentLoop:
     for file_name in FOUNDATION_DOCUMENT_FILE_NAMES:
         (workspace / file_name).write_text(f"# {file_name}\n", encoding="utf-8")
     placeholder_client = object()
-    return AgentLoop(placeholder_client, file_store, ShellExecutor(workspace))
+    model_configuration = ModelConfiguration(
+        model_id=DEFAULT_MODEL_ID, base_url=None, prompt_caching_is_enabled=True
+    )
+    return AgentLoop(
+        placeholder_client,
+        model_configuration,
+        file_store,
+        ShellExecutor(workspace),
+    )
 
 
 class TestFileStore:
@@ -153,6 +165,41 @@ class TestAgentLoopDispatch:
     ) -> None:
         for file_name in FOUNDATION_DOCUMENT_FILE_NAMES:
             assert file_name in agent_loop.system_prompt
+
+
+class TestModelConfiguration:
+    def test_defaults_to_anthropic_cloud_with_caching(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("NOETIC_MODEL_ID", raising=False)
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        model_configuration = model_configuration_load()
+        assert model_configuration.model_id == DEFAULT_MODEL_ID
+        assert model_configuration.base_url is None
+        assert model_configuration.prompt_caching_is_enabled
+
+    def test_model_id_override_is_respected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NOETIC_MODEL_ID", "qwen3-coder")
+        model_configuration = model_configuration_load()
+        assert model_configuration.model_id == "qwen3-coder"
+
+    def test_custom_base_url_disables_prompt_caching(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://192.168.1.10:11434")
+        model_configuration = model_configuration_load()
+        assert model_configuration.base_url == "http://192.168.1.10:11434"
+        assert not model_configuration.prompt_caching_is_enabled
+
+    def test_system_prompt_block_carries_cache_control_when_enabled(self) -> None:
+        system_prompt_block = system_prompt_block_build("prompt", True)
+        assert system_prompt_block["cache_control"] == {"type": "ephemeral"}
+
+    def test_system_prompt_block_omits_cache_control_when_disabled(self) -> None:
+        system_prompt_block = system_prompt_block_build("prompt", False)
+        assert "cache_control" not in system_prompt_block
 
 
 class TestEnvironmentValidation:

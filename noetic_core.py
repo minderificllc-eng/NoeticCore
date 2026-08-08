@@ -18,8 +18,10 @@ from typing import Any, Callable
 import anthropic
 from anthropic.types import Message, ToolUseBlock
 
-MODEL_ID = "claude-opus-5"
+DEFAULT_MODEL_ID = "claude-opus-5"
 API_KEY_ENVIRONMENT_VARIABLE_NAME = "ANTHROPIC_API_KEY"
+MODEL_ID_ENVIRONMENT_VARIABLE_NAME = "NOETIC_MODEL_ID"
+BASE_URL_ENVIRONMENT_VARIABLE_NAME = "ANTHROPIC_BASE_URL"
 
 SOUL_FILE_NAME = "SOUL.md"
 AGENT_FILE_NAME = "AGENT.md"
@@ -220,6 +222,52 @@ class IterationLimitReachedError(NoeticCoreError):
 
 
 @dataclass(frozen=True)
+class ModelConfiguration:
+    """Which model to talk to, and over which endpoint.
+
+    base_url is None for the Anthropic cloud API; any other value is an
+    Anthropic-compatible endpoint (for example an Ollama server on the LAN).
+    Prompt caching is an Anthropic-cloud feature, so it is enabled only there.
+    """
+
+    model_id: str
+    base_url: str | None
+    prompt_caching_is_enabled: bool
+
+
+def model_configuration_load() -> ModelConfiguration:
+    """Return the model configuration read from the environment."""
+    model_id = os.environ.get(MODEL_ID_ENVIRONMENT_VARIABLE_NAME, DEFAULT_MODEL_ID)
+    base_url = os.environ.get(BASE_URL_ENVIRONMENT_VARIABLE_NAME) or None
+    return ModelConfiguration(
+        model_id=model_id,
+        base_url=base_url,
+        prompt_caching_is_enabled=base_url is None,
+    )
+
+
+def model_target_describe(model_configuration: ModelConfiguration) -> str:
+    """Return a one-line description of where requests will be sent."""
+    if model_configuration.base_url is None:
+        return f"model {model_configuration.model_id} via the Anthropic API"
+    return (
+        f"model {model_configuration.model_id}"
+        f" via {model_configuration.base_url}"
+    )
+
+
+def system_prompt_block_build(
+    system_prompt: str, prompt_caching_is_enabled: bool
+) -> dict[str, Any]:
+    """Return the system prompt as a content block, with a cache breakpoint
+    only when the endpoint supports prompt caching."""
+    system_prompt_block: dict[str, Any] = {"type": "text", "text": system_prompt}
+    if prompt_caching_is_enabled:
+        system_prompt_block["cache_control"] = {"type": "ephemeral"}
+    return system_prompt_block
+
+
+@dataclass(frozen=True)
 class ShellCommandResult:
     """The captured outcome of one shell command."""
 
@@ -374,10 +422,12 @@ class AgentLoop:
     def __init__(
         self,
         anthropic_client: anthropic.Anthropic,
+        model_configuration: ModelConfiguration,
         file_store: FileStore,
         shell_executor: ShellExecutor,
     ) -> None:
         self.anthropic_client = anthropic_client
+        self.model_configuration = model_configuration
         self.file_store = file_store
         self.shell_executor = shell_executor
         self.system_prompt = self.foundation_documents_load()
@@ -433,14 +483,13 @@ class AgentLoop:
     def model_response_request(self) -> Message:
         """Send the conversation to the model and return the full response."""
         with self.anthropic_client.messages.stream(
-            model=MODEL_ID,
+            model=self.model_configuration.model_id,
             max_tokens=MAXIMUM_RESPONSE_TOKENS,
             system=[
-                {
-                    "type": "text",
-                    "text": self.system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }
+                system_prompt_block_build(
+                    self.system_prompt,
+                    self.model_configuration.prompt_caching_is_enabled,
+                )
             ],
             tools=TOOL_DEFINITIONS,
             messages=self.conversation_messages,
@@ -565,10 +614,17 @@ def foundation_documents_verify(file_store: FileStore) -> None:
 def application_build_run(workspace_directory: Path) -> str:
     """Validate the environment, then run the loop to completion."""
     api_key_verify()
+    model_configuration = model_configuration_load()
+    print(f"NoeticCore starting: {model_target_describe(model_configuration)}")
     file_store = FileStore(workspace_directory)
     foundation_documents_verify(file_store)
     shell_executor = ShellExecutor(workspace_directory)
-    agent_loop = AgentLoop(anthropic.Anthropic(), file_store, shell_executor)
+    agent_loop = AgentLoop(
+        anthropic.Anthropic(base_url=model_configuration.base_url),
+        model_configuration,
+        file_store,
+        shell_executor,
+    )
     return agent_loop.loop_run()
 
 
@@ -606,8 +662,8 @@ def main() -> int:
         return EXIT_CODE_FAILURE
     except anthropic.APIConnectionError:
         print(
-            "Could not reach the Anthropic API: check the network connection"
-            " and rerun.",
+            "Could not reach the model endpoint: check the network connection"
+            f" (and {BASE_URL_ENVIRONMENT_VARIABLE_NAME}, if set), then rerun.",
             file=sys.stderr,
         )
         return EXIT_CODE_FAILURE
