@@ -47,12 +47,10 @@ related operations together alphabetically and makes call sites read as
 
 ```python
 # Wrong (verb-first)
-load_soul_document()
 read_file()
 append_message_to_context()
 
 # Right (noun_verb, generic → specific)
-document_soul_load()
 file_read()
 context_message_append()
 ```
@@ -61,13 +59,47 @@ The noun chain narrows left to right: `file_read` (any file),
 `file_json_read` (a JSON file), `config_file_json_read` would be wrong —
 `config` is the generic domain, so it leads: `config_json_read`.
 
+A more specific noun is added **only when the behavior differs** — never
+when only the target differs. `file_json_read` earns its extra noun because
+JSON parsing is different behavior; a function that merely reads one
+particular file does not (see "Write the Larger Capability" below).
+
+### Write the Larger Capability
+
+A function name that bakes in a particular target is usually a symptom: the
+proposed function is only a **window into a larger capability** — the same
+operation, aimed at one specific input. Do not write the window. Write the
+capability once, generally, and pass the specifics as parameters.
+
+```python
+# Wrong — three windows into one capability
+def soul_file_load(): ...
+def agent_file_load(): ...
+def seed_file_load(): ...
+
+# Right — one capability, parameterized by its target
+SOUL_FILE_NAME = "SOUL.md"
+AGENT_FILE_NAME = "AGENT.md"
+SEED_FILE_NAME = "SEED.md"
+
+def file_load(file_path: Path) -> str: ...
+
+soul_content = file_load(Path(SOUL_FILE_NAME))
+```
+
+The test: if two proposed functions would differ only in a constant —
+a file name, a key, a URL, a threshold — they are the same capability, and
+that constant belongs in the argument list, not the function name. This is
+the naming-level expression of the composability principle: general
+capabilities combine; special-cased wrappers multiply.
+
 ### Variables and constants
 
 - Variables are nouns or noun phrases: `retry_attempt_count`, not `n` or `cnt`.
 - Booleans read as assertions: `is_file_present`, `has_reached_stop_condition`.
 - Constants are `UPPER_SNAKE_CASE` and include units where applicable:
   `REQUEST_TIMEOUT_SECONDS`, `MAXIMUM_CONTEXT_TOKENS`.
-- Classes are `PascalCase` nouns: `AgentLoop`, `DocumentStore`.
+- Classes are `PascalCase` nouns: `AgentLoop`, `FileStore`.
 
 ---
 
@@ -86,9 +118,9 @@ order of preference:
 
 ```python
 # Wrong
-def document_load(file_path):
+def file_load(file_path):
     if file_path.exists():
-        if file_path.suffix == ".md":
+        if file_path.suffix in SUPPORTED_FILE_SUFFIXES:
             content = file_path.read_text()
             if content:
                 return content
@@ -98,14 +130,14 @@ def document_load(file_path):
             return None
 
 # Right
-def document_load(file_path: Path) -> str:
+def file_load(file_path: Path) -> str:
     if not file_path.exists():
-        raise DocumentNotFoundError(file_path)
-    if file_path.suffix != MARKDOWN_FILE_SUFFIX:
-        raise DocumentFormatError(file_path, expected_suffix=MARKDOWN_FILE_SUFFIX)
+        raise FileMissingError(file_path)
+    if file_path.suffix not in SUPPORTED_FILE_SUFFIXES:
+        raise FileFormatError(file_path, supported_suffixes=SUPPORTED_FILE_SUFFIXES)
     content = file_path.read_text(encoding="utf-8")
     if not content.strip():
-        raise DocumentEmptyError(file_path)
+        raise FileEmptyError(file_path)
     return content
 ```
 
@@ -165,7 +197,7 @@ structural sense (indexing, counting from zero, emptiness checks).
 ## Object Orientation — Where It Earns Its Place
 
 Use a class when state and the behavior that governs it belong together
-(`AgentLoop`, `DocumentStore`, `ConversationContext`). Use plain functions
+(`AgentLoop`, `FileStore`, `ConversationContext`). Use plain functions
 when there is no state to protect. Use `@dataclass(frozen=True)` for
 pure data records.
 
@@ -204,7 +236,7 @@ processes, user input — is handled according to these rules:
    specific error. Interior code may then rely on validated data.
 2. **A domain exception hierarchy.** Define one root exception per subsystem
    (e.g., `NoeticCoreError`) with specific subclasses
-   (`DocumentNotFoundError`, `AgentActionError`). Raise these — never bare
+   (`FileMissingError`, `AgentActionError`). Raise these — never bare
    `Exception` — and include the failing values in the message.
 3. **Catch narrowly, never silently.**
    - Never `except:` or `except Exception: pass`.
@@ -235,14 +267,14 @@ except:
     content = ""
 
 # Right
-def document_file_read(file_path: Path) -> str:
-    """Return the document's text. Raises DocumentNotFoundError or DocumentReadError."""
+def file_read(file_path: Path) -> str:
+    """Return the file's text. Raises FileMissingError or FileReadError."""
     if not file_path.exists():
-        raise DocumentNotFoundError(file_path)
+        raise FileMissingError(file_path)
     try:
         return file_path.read_text(encoding="utf-8")
     except OSError as read_error:
-        raise DocumentReadError(file_path) from read_error
+        raise FileReadError(file_path) from read_error
 ```
 
 ---
@@ -254,6 +286,9 @@ Before merging, confirm:
 - [ ] No function nests deeper than two levels.
 - [ ] Every identifier is fully spelled out; functions are `noun_verb`,
       generic to specific.
+- [ ] No function is a narrow window into a larger capability — operations
+      that differ only in a constant are one function, with the constant
+      passed as a parameter.
 - [ ] No unexplained literals; constants are named, with units.
 - [ ] Every function has type hints and does exactly one thing.
 - [ ] Side effects are confined to named boundary functions.
