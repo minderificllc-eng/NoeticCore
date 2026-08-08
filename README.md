@@ -40,11 +40,20 @@ These file-system primitives form the primary action space. The agent uses them 
 ## Getting Started
 
 ```bash
-# Clone or place the project files, then run the loop
+pip install -r requirements.txt
+export ANTHROPIC_API_KEY=your-api-key
+
+# Run the loop in the directory containing the core documents
 python noetic_core.py
 ```
 
-Ensure `SOUL.md`, `AGENT.md`, and `SEED.md` are present in the working directory before starting.
+Ensure `SOUL.md`, `AGENT.md`, and `SEED.md` are present in the working directory before starting. Edit `SEED.md` to describe the application you want built; the included seed is a small runnable demo.
+
+Run the unit tests with:
+
+```bash
+python -m pytest tests/
+```
 
 ## Design Philosophy
 
